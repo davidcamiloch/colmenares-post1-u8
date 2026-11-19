@@ -60,3 +60,70 @@ iguales:
 
 El bucle termina en el primer nulo de cualquiera de las dos cadenas: si solo una llegó al nulo los caracteres difieren y salta a `distintas`; si ambas llegan a la vez son iguales. En `post1d.asm` el CX = 8 fijo es correcto porque `cad1`, `cad2` y `cad3` son literales de exactamente 8 caracteres conocidos en tiempo de ensamblado; la constante `LONG_CMP` documenta esa suposición. La regla es usar CX fijo solo cuando el ensamblador conoce la longitud y verificar el terminador en todos los demás casos.
 
+## Parte 2: Aritmética de precisión múltiple y BCD
+
+| Programa | Instrucciones | Salida verificada |
+|----------|---------------|-------------------|
+| `post2.asm` | `ADD` + `ADC`, `SUB` + `SBB` sobre DX:AX | `Suma OK: 0003:0000` y `Resta OK: 0001:FFFF` |
+| `post2b.asm` | `ADD` + `DAA`, `SUB` + `DAS` | `47 + 38 = 85`, `99 + 01 = 00 CF = 1`, `73 - 28 = 45`, `20 - 01 = 19` |
+| `post2c.asm` | `MUL`, `DIV`, `AAM` | `7 * 8 = 56`, `9 / 4 = 2 resto 1`, `Division por cero.` |
+| `post2d.asm` | `ADD` + `AAA`, `SUB` + `AAS` | `AAA: 7 + 8 = 15` y `AAS: 13 - 8 = 05` |
+
+En `post2.asm` el acarreo es el único enlace entre las dos mitades. `FFFFh + 0001h` deja la parte baja en 0000h y CF = 1; `ADC` suma ese bit a las partes altas: 0001h + 0001h + 1 = 0003h. En la resta `0000h − 0001h` deja FFFFh con CF = 1 como préstamo y `SBB` lo descuenta: 0003h − 0001h − 1 = 0001h. DEBUG lo confirma: tras el ADC, AX = 0000 y DX = 0003; tras el SBB, AX = FFFF y DX = 0001.
+
+En BCD empaquetado cada nibble guarda un dígito decimal. `47h + 38h` da 7Fh en binario; el nibble bajo F supera 9, así que DAA suma 6 y obtiene 85h. `99h + 01h` da 9Ah; DAA suma 6 al nibble bajo y 60h al byte y deja 00h con CF = 1, el acarreo hacia el siguiente byte BCD. `post2b.asm` imprime ese CF sumándolo a `'0'` con `ADC`.
+
+En BCD desempaquetado cada byte guarda un dígito en el nibble bajo y AH recibe el acarreo. Tras `07h + 08h = 0Fh`, AAA deja AH = 01h y AL = 05h con CF = 1. Tras `03h − 08h = FBh`, AAS deja AH = 00h y AL = 05h. DEBUG muestra AX = 0105 y AX = 0005 con CY.
+
+### Desviaciones respecto a la guía
+
+- `post2.asm` reúne la suma del Paso 1 y la resta del Paso 2 e imprime los resultados reales en hexadecimal con una subrutina `hex16`, en lugar de un texto fijo.
+- `post2b.asm` incluye también la resta con DAS del Paso 4 y el caso `99 + 01` que la guía pide probar.
+- `post2c.asm`: la etiqueta `pOp` de la guía no ensambla en NASM porque se confunde con la instrucción `POP`; NASM no distingue mayúsculas en los nombres de instrucción. Se renombró `pOper`. El resultado se convierte con `AAM`, como pide la rúbrica, y la división imprime también el resto.
+- `post2d.asm`: la guía ejecuta AAA sin limpiar AH. Después de `INT 21h/09h`, AH sigue en 09h y AAA lo incrementa a 0Ah; la decena se imprimiría como `:` (30h + 0Ah = 3Ah). Se carga `AX = 0007h` antes de la suma y `AX = 0103h` antes de la resta, que representa `13` desempaquetado.
+
+### Decisión técnica 3: DAA y DAS o AAA y AAS según el formato
+
+La instrucción de ajuste depende del formato del dato y no de la operación. DAA y DAS trabajan sobre BCD empaquetado: examinan el nibble bajo de AL y AF y después el byte completo con CF, porque cada nibble es un dígito. AAA y AAS trabajan sobre BCD desempaquetado: solo corrigen el nibble bajo, ponen en cero el nibble alto y llevan el acarreo a AH. Aplicar AAA a un byte empaquetado 47h destruye las decenas; aunque no haya ajuste, AAA limpia el nibble alto y el 4 desaparece, y el resultado queda en 07h. La calculadora de `post2c.asm` lee cada dígito con INT 21h/01h y le resta 30h; el resultado es un dígito desempaquetado con el nibble alto en cero. Si sumara dos dígitos así, la instrucción correcta sería AAA: tras `07h + 08h = 0Fh` deja AH = 01h y AL = 05h, el 15 en dos bytes listos para sumarles 30h e imprimirlos. DAA sobre 0Fh también produce 15h, pero lo deja empaquetado en un solo byte y CF no se activa; la decena no pasa a AH y el código de impresión de un dígito por byte mostraría el carácter 45h (`E`) en lugar de `1` y `5`. La regla es DAA y DAS para dos dígitos por byte y AAA y AAS para un dígito por byte.
+
+### Decisión técnica 4: ADC fijo o una cadena de ADC en bucle
+
+`post2.asm` suma 32 bits con dos instrucciones porque el número cabe en DX:AX. Para N palabras el patrón se generaliza recorriendo de la palabra de menor peso a la de mayor peso:
+
+```
+  mov  si, numA          ; palabra menos significativa primero
+  mov  di, numB
+  mov  bx, res
+  mov  cx, N
+  clc                    ; no hay acarreo antes de la primera palabra
+sumar:
+  mov  ax, [si]
+  adc  ax, [di]          ; suma + CF de la palabra anterior
+  mov  [bx], ax
+  inc  si                ; INC y LOOP no modifican CF
+  inc  si
+  inc  di
+  inc  di
+  inc  bx
+  inc  bx
+  loop sumar
+```
+
+La primera palabra no tiene acarreo previo: en el código fijo se usa ADD; en el bucle se obtiene el mismo efecto con CLC antes de entrar, de modo que el primer ADC suma un CF igual a cero. Todas las palabras siguientes deben usar ADC porque el CF que dejó la palabra anterior es justamente el acarreo que hay que incorporar; con ADD se perdería y el resultado quedaría corto en 10000h por cada acarreo perdido. Dentro del bucle solo pueden usarse instrucciones que no toquen CF entre dos ADC; por eso los punteros avanzan con INC y no con ADD. El bucle es más mantenible: cambiar de 32 a 128 bits es cambiar N, y la misma rutina sirve como base de un tipo bignum. El precio es rendimiento; cada palabra paga ocho instrucciones de control además del ADC, igual que el bucle LODSB y STOSB de la Parte 1 paga por su flexibilidad frente a REP MOVSB. La regla es código fijo cuando el tamaño es conocido y pequeño, y bucle con ADC cuando la precisión es variable.
+
+## Capturas
+
+| Captura | Contenido |
+|---------|-----------|
+| `capturas/p1-compilacion.png` | Ensamblado de los nueve programas y sus tamaños |
+| `capturas/p1-cp1-cp5-ejecucion.png` | Salidas de post1, post1b, post1c, post1d y post1e |
+| `capturas/p1-debug-movsb-scasb.png` | SI, DI y CX tras REP MOVSB, volcado de `destino` y estado tras REPNE SCASB |
+| `capturas/p2-cp1-cp4-cp6-ejecucion.png` | Salidas de post2, post2b y post2d |
+| `capturas/p2-cp5-calculadora.png` | Calculadora: 7 * 8, 9 / 4 y división por cero |
+| `capturas/p2-debug-adc-sbb-aaa-aas.png` | DX:AX tras ADC y SBB, AX tras AAA y AAS |
+
+## Referencias
+
+- Cloutier, F. (s.f.). *x86 and amd64 instruction reference*. https://www.felixcloutier.com/x86/
+- NASM Development Team. (s.f.). *NASM — The Netwide Assembler: documentación*. https://www.nasm.us/doc/
+- Intel BCD opcodes. (s.f.). En *Wikipedia*. https://en.wikipedia.org/wiki/Intel_BCD_opcodes
